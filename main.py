@@ -1,5 +1,4 @@
-# -*- coding: utf-8 -*-
-
+import tarfile, io
 import time
 import argparse
 
@@ -10,27 +9,51 @@ from sklearn.metrics import accuracy_score
 from torch import autograd, nn, optim
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from korean_character_parser import decompose_str_as_one_hot
-from kin_query_dataset import load_batch_input_to_memory, get_dataloaders, read_test_file
+from dataset import load_batch_input_to_memory, get_dataloaders, read_test_file
 
 import nsml
 from nsml import DATASET_PATH, IS_DATASET, GPU_NUM
 
 
-def bind_model(model):
+def bind_model(model, wv_model):
     def save(filename, *args):
         # save the model with 'checkpoint' dictionary.
         checkpoint = {
             'model': model.state_dict()
         }
-        torch.save(checkpoint, filename)
+        torch_file = io.BytesIO()
+        torch.save(checkpoint, torch_file)
+        torch_info = tarfile.TarInfo("torch")
+        torch_info.size = len(torch_file.getbuffer())
+
+        wv_file = io.BytesIO()
+        wv_model.save_to(wv_file)
+        wv_info = tarfile.TarInfo("word2vec")
+        wv_info.size = len(wv_file.getbuffer())
+
+        tarball = tarfile.open(filename, 'w')
+        tarball.add(wv_info, wv_file)
+        tarball.add(torch_info, torch_file)
+        tarball.close()
 
     def load(filename, *args):
-        checkpoint = torch.load(filename)
-        model.load_state_dict(checkpoint['model'])
-        print('Model loaded')
+        tarball = tarfile.open(filename, 'r')
+        for mem in tarball.getmembers():
+            file = extractfile(mem)
+            if mem.name == 'word2vec':
+                wv_model.load_from(file)
+                print('Word2Vec Model loaded')
+
+            elif mem.name == 'torch':
+                checkpoint = torch.load(file)
+                model.load_state_dict(checkpoint['model'])
+                print('PyTorch Model loaded')
+
 
     def infer(raw_data, **kwargs):
         data = raw_data['data']
+        data = wv_model.preprocess_train(data)
+        
         model.eval()
         output_predictions = model(data)
         output_predictions = output_predictions.squeeze()
@@ -115,7 +138,7 @@ class LSTMRegression(nn.Module):
         # (Batch X Compact_Time , Embeded_Feature)
         packed_x = pack_padded_sequence(embeds, var_lengths.data.cpu().numpy(), batch_first=True)
         # Compact_time means a tensor without pads. So this is a concatenated tensor with only useful sequence.
-        # Ex) [[53, 16], [40,16]] --> [53+40, 16] 
+        # Ex) [[53, 16], [40,16]] --> [53+40, 16]
 
         # This makes the memory the parameters and its grads occupied contiguous for efficiency of memory usage..
         self.lstm.flatten_parameters()

@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-
 import csv
 import os
 
@@ -7,6 +5,8 @@ import numpy as np
 import torch
 from torch.utils.data.sampler import SubsetRandomSampler
 from torch.utils.data import Dataset
+
+from preprocess import make_dict
 
 from nsml import GPU_NUM
 
@@ -36,7 +36,7 @@ class KinDataset(Dataset):
 
             for idx, (data, label) in enumerate(zip(read_line, data_label)):
                 # data = decompose_str_as_one_hot(data[0], warning=False)
-                data = data[0]
+                data = preprocess_sentence(data[0])
                 label = int(label[0])
                 self.loaded_data.append([data, label])
 
