@@ -6,8 +6,6 @@ import torch
 from torch.utils.data.sampler import SubsetRandomSampler
 from torch.utils.data import Dataset
 
-from preprocess import make_dict
-
 from nsml import GPU_NUM
 
 
@@ -17,12 +15,14 @@ test_data_name = 'test_data'
 
 
 class KinDataset(Dataset):
-    def __init__(self, dataset_path):
+    def __init__(self, dataset_path, preprocessor):
         self.loaded_data = []
+        self.preprocessor = preprocessor
+
         data_path = os.path.join(dataset_path, 'train', train_data_name)  # Train data only
         data_label = os.path.join(dataset_path, 'train', train_label_name)
 
-        with open(data_path, 'rt', 50 * 1024 * 1024) as data_csvfile,\
+        with open(data_path, 'rt', 50 * 1024 * 1024, encoding='utf-8') as data_csvfile,\
                 open(data_label, 'rt') as data_label:  # maximum buffer size == 50 MB
             # the fastest way of counting the number of total file lines.
             self.total_data_length = sum(1 for _ in data_csvfile)
@@ -36,9 +36,11 @@ class KinDataset(Dataset):
 
             for idx, (data, label) in enumerate(zip(read_line, data_label)):
                 # data = decompose_str_as_one_hot(data[0], warning=False)
-                data = preprocess_sentence(data[0])
+                data = preprocessor.parse_sentence(data[0])
                 label = int(label[0])
                 self.loaded_data.append([data, label])
+
+        preprocessor.make_dict(self)
 
     def __len__(self):
         return self.total_data_length
@@ -46,7 +48,7 @@ class KinDataset(Dataset):
     def __getitem__(self, idx):
         # this should return only one pair of instance (x, y).
         seqs = self.loaded_data[idx]
-        batch_input = seqs[0]
+        batch_input = self.preprocessor.map_vector(seqs[0])
         batch_target = seqs[1]
         return [batch_input, batch_target]
 
@@ -93,9 +95,9 @@ def custom_collate_fn(data):
     return [data, tensor_targets]
 
 
-def get_dataloaders(dataset_path, batch_size, ratio_of_validation=0.2, shuffle=True):
+def get_dataloaders(dataset_path, batch_size, ratio_of_validation=0.2, shuffle=True, preprocessor=None):
     num_workers = 4  # num of threads to load data, default is 0. if you use thread(>1), don't confuse even if debug messages are reported asynchronously.
-    train_kin_dataset = KinDataset(dataset_path=dataset_path)
+    train_kin_dataset = KinDataset(dataset_path=dataset_path, preprocessor=preprocessor)
 
     num_train = len(train_kin_dataset)
     split_point = int(ratio_of_validation * num_train)
@@ -124,13 +126,13 @@ def get_dataloaders(dataset_path, batch_size, ratio_of_validation=0.2, shuffle=T
     return [train_loader, val_loader]
 
 
-def read_test_file(dataset_path):
+def read_test_file(dataset_path, preprocessor):
     data_path = os.path.join(dataset_path, 'test', test_data_name)
     loaded_data = []
     with open(data_path, 'rt', 50 * 1024 * 1024) as data_csvfile:  # maximum buffer size == 50 MB
         data_csvfile.seek(0)
         read_line = csv.reader(data_csvfile)
         for idx, data in enumerate(read_line):
-            data = data[0]
+            data = preprocessor.preprocess_test(data[0])
             loaded_data.append([data])
     return loaded_data

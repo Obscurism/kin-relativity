@@ -1,14 +1,18 @@
-import tarfile, io
-import time
 import argparse
+import io
+import tarfile
+import time
 
 import numpy as np
+
+from sklearn.metrics import accuracy_score
+
 import torch
 import torch.nn.functional as F
-from sklearn.metrics import accuracy_score
 from torch import autograd, nn, optim
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
-from korean_character_parser import decompose_str_as_one_hot
+
+from preprocess import Preprocessor
 from dataset import load_batch_input_to_memory, get_dataloaders, read_test_file
 
 import nsml
@@ -52,8 +56,8 @@ def bind_model(model, wv_model):
 
     def infer(raw_data, **kwargs):
         data = raw_data['data']
-        data = wv_model.preprocess_train(data)
-        
+        data = wv_model.preprocess_test(data)
+
         model.eval()
         output_predictions = model(data)
         output_predictions = output_predictions.squeeze()
@@ -66,13 +70,13 @@ def bind_model(model, wv_model):
 
 
 def data_loader(dataset_path, train=False, batch_size=200,
-                ratio_of_validation=0.1, shuffle=True):
+                ratio_of_validation=0.1, shuffle=True, preprocessor=None):
     if train:
         return get_dataloaders(dataset_path=dataset_path, batch_size=batch_size,
                                ratio_of_validation=ratio_of_validation,
-                               shuffle=shuffle)
+                               shuffle=shuffle, preprocessor=preprocessor)
     else:
-        data_dict = {'data': read_test_file(dataset_path=DATASET_PATH)}
+        data_dict = {'data': read_test_file(dataset_path=DATASET_PATH, preprocessor=preprocessor)}
         return data_dict
 
 
@@ -225,6 +229,9 @@ if __name__ == '__main__':
 
     model = LSTMRegression(config.embedding, config.hidden, config.layers,
                             config.char, config.output, config.batch)
+
+    wv_model = Preprocessor()
+
     loss_function = nn.BCELoss()
     if GPU_NUM:
         model = model.cuda()
@@ -236,20 +243,19 @@ if __name__ == '__main__':
     else:
         optimizer = optim.Adam(model.parameters(), lr=config.initial_lr)
 
-    bind_model(model)
+    bind_model(model, wv_model)
     if config.pause:
         nsml.paused(scope=locals())
 
     if config.mode == 'train':
+        data_path = "./dummy/kin/"
+
         if IS_DATASET:
-            train_loader, val_loader = data_loader(dataset_path=DATASET_PATH, train=True,
-                                                   batch_size=config.batch, ratio_of_validation=0.1,
-                                                   shuffle=True)
-        else:
-            data_path = '../dummy/kin_data/'  # NOTE: load from local PC
-            train_loader, val_loader = data_loader(dataset_path=data_path, train=True,
-                                                   batch_size=config.batch, ratio_of_validation=0.1,
-                                                   shuffle=True)
+            data_path = DATASET_PATH
+
+        train_loader, val_loader = data_loader(dataset_path=data_path, train=True,
+                                               batch_size=config.batch, ratio_of_validation=0.1,
+                                               shuffle=True, preprocessor=wv_model)
 
         min_val_loss = np.inf
         for epoch in range(config.epochs):
@@ -259,6 +265,7 @@ if __name__ == '__main__':
             # evaluate on validation set
             val_loss, val_acc = inference_loop(val_loader, model, loss_function,
                                                None, threshold, learning=False)
+
             print('epoch:', epoch, ' train_loss:', train_loss, 'train_acc:', train_acc,
                   ' val_loss:', val_loss, ' min_val_loss:', min_val_loss,
                   'val_acc:', val_acc)
@@ -272,6 +279,7 @@ if __name__ == '__main__':
             if val_loss <= min_val_loss:
                 min_val_loss = val_loss
                 nsml.save(epoch)
+
             else:  # default save
-                if epoch % 30 == 0:
+                if epoch % 20 == 0:
                     nsml.save(epoch)
