@@ -6,14 +6,28 @@ import torch
 import tarfile
 import time
 
-from dataset import load_batch_input_to_memory, get_dataloaders, read_test_file
+from dataset import load_batch_input_to_memory, get_dataloaders, read_test_file, word2vec_mapped_size
 from nsml import DATASET_PATH, IS_DATASET, GPU_NUM
 from preprocess import Preprocessor
 from sklearn.metrics import accuracy_score
 
-from torch import autograd, nn, optim, Tensor
+from torch import cat, nn, optim, Tensor
+from torch.autograd import Variable
 from torch.nn.functional import sigmoid
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+
+
+# May the table be with you
+
+# ===SHAPE TABLE===
+# Vocab := array(50,)
+# Sentence := [Vocab...]
+# SentenceSequence := [Sentence...]
+# Input := [SentenceSequence, SentenceSequence]
+# InputSet := [Input...]
+# Ouput := int
+# Data := [Input, Output]
+# Dataset := [Data...]
 
 
 def bind_model(model, wv_model):
@@ -80,21 +94,20 @@ def data_loader(dataset_path, train=False, batch_size=200,
 class LSTMRegression(nn.Module):
     def __init__(self, hidden_dim, num_layers, output_dim, minibatch_size):
         super(LSTMRegression, self).__init__()
-        self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
-        self.character_size = character_size
         self.output_dim = output_dim
         self.minibatch_size = minibatch_size
-        # this embedding is a table to handle sparse matrix instead of one-hot coding. so we just feed a list of indexes.
-        self.lstm = nn.LSTM(self.embedding_dim, self.hidden_dim, self.num_layers)
-        # non-linear function is defined later.
-        self.hidden2score = nn.Linear(self.hidden_dim, self.output_dim)
+
+        # TODO bidir
+        self.lstm0_l0 = nn.LSTM(word2vec_mapped_size, self.hidden_dim, self.num_layers)
+        self.lstm1_l0 = nn.LSTM(word2vec_mapped_size, self.hidden_dim, self.num_layers)
+        self.dense_l1 = nn.Linear(2 * self.hidden_dim, self.output_dim)
 
     def init_hidden(self):
-        initializer_1 = autograd.Variable(
+        initializer_1 = Variable(
             torch.zeros(self.num_layers, self.minibatch_size, self.hidden_dim))
-        initializer_2 = autograd.Variable(
+        initializer_2 = Variable(
             torch.zeros(self.num_layers, self.minibatch_size, self.hidden_dim))
         if GPU_NUM:
             initializer_1 = initializer_1.cuda()
@@ -102,41 +115,58 @@ class LSTMRegression(nn.Module):
         return initializer_1, initializer_2
 
     def forward(self, data):
-        preprocessed = np.array([datum[0] for datum in data])
+        # data: Dataset
+        # datum: Data
+        # preprocessed: InputSet
+        preprocessed = [datum[0] for datum in data]
+        preprocessed.sort(key=lambda x: len(x[0]), reverse=True)
 
-        var_seqs, var_lengths, pad_len = load_batch_input_to_memory(preprocessed, has_targets=False)
-        var_seqs = Tensor(var_seqs)
-        var_lengths = Tensor(var_lengths)
+        # var_seqs: InputSet
+        # var_lengths: array(None,)
+        var_seqs, var_lengths = load_batch_input_to_memory(preprocessed, has_targets=False)
+
+        var_seqs = Variable(var_seqs)
+        var_lengths = Variable(var_lengths)
 
         if GPU_NUM:
             var_seqs = var_seqs.cuda(async=True)
+            var_lengths = var_lengths.cuda(async=True)
 
         self.minibatch_size = len(var_lengths)
 
-        # (Batch X Compact_Time , Embeded_Feature)
-        packed_x1 = pack_padded_sequence(var_seqs[0], var_lengths.data.cpu().numpy(), batch_first=True)
-        # Compact_time means a tensor without pads. So this is a concatenated tensor with only useful sequence.
-        # Ex) [[53, 16], [40,16]] --> [53+40, 16]
+        var_seqs_x0 = var_seqs[:, 0]
+        var_seqs_x1 = var_seqs[:, 1]
+
+        packed_x0 = pack_padded_sequence(var_seqs_x0, var_lengths.data.cpu().numpy(), batch_first=True)
+        packed_x1 = pack_padded_sequence(var_seqs_x1, var_lengths.data.cpu().numpy(), batch_first=True)
 
         # This makes the memory the parameters and its grads occupied contiguous for efficiency of memory usage..
-        self.lstm.flatten_parameters()
+        self.lstm0_l0.flatten_parameters()
+        self.lstm1_l0.flatten_parameters()
 
-        # _hidden is not important, the output is important.
-        packed_output, _hidden = self.lstm(packed_x, self.init_hidden())
+        x0_out, _hidden0 = self.lstm0_l0(packed_x0, self.init_hidden())
+        x1_out, _hidden1 = self.lstm1_l0(packed_x1, self.init_hidden())
 
         # Reverse operation of pack_padded_sequence. as (Time, Batch, Concatenation of 2 directional hidden's output).
-        lstm_outs, _ = pad_packed_sequence(packed_output)
+        x0_out, _ = pad_packed_sequence(x0_out)
+        x1_out, _ = pad_packed_sequence(x1_out)
 
         # Implementation of last relevant output indexing.
         if GPU_NUM:
-            idx = ((var_lengths - 1).view(-1, 1).expand(lstm_outs.size(1),
-                                                        lstm_outs.size(2)).unsqueeze(0)).cuda()  # async=True
+            idx = ((var_lengths - 1).view(-1, 1).expand(x0_out.size(1),
+                                                        x0_out.size(2)).unsqueeze(0)).cuda()  # async=True
         else:
-            idx = ((var_lengths - 1).view(-1, 1).expand(lstm_outs.size(1),
-                                                        lstm_outs.size(2)).unsqueeze(0))
+            idx = ((var_lengths - 1).view(-1, 1).expand(x0_out.size(1),
+                                                        x0_out.size(2)).unsqueeze(0))
+
         # squeeze remove all ones, so it breaks when batch size is 1. dim=0 should be added to avoid it
-        last_lstm_outs = lstm_outs.gather(0, idx).squeeze(dim=0)
-        output_activation = self.hidden2score(last_lstm_outs)
+        x0_out = x0_out.gather(0, idx).squeeze(dim=0)
+        x1_out = x1_out.gather(0, idx).squeeze(dim=0)
+
+        # CAT IS SO CUTE, unless the cat is 'concat'. Nyan Nyan Nyan
+        lstm_out = cat((x0_out, x1_out))
+
+        output_activation = self.dense_l1(lstm_out)
 
         output_pred = sigmoid(output_activation)
         return output_pred
@@ -155,9 +185,9 @@ def inference_loop(data_loader, model, loss_function, optimizer, threshold, lear
         # we need to clear out the hidden state of the LSTM, detaching it from its history on the last instance.
         # Tensors not supported in DataParallel. You should put Variable to use data_parallel before call forward().
         if GPU_NUM:
-            var_targets = autograd.Variable(label.float(), requires_grad=False).cuda(async=True)
+            var_targets = Variable(label.float(), requires_grad=False).cuda(async=True)
         else:
-            var_targets = autograd.Variable(label.float(), requires_grad=False)
+            var_targets = Variable(label.float(), requires_grad=False)
         output_predictions = model(data)
         output_predictions = output_predictions.squeeze()
 
@@ -182,7 +212,7 @@ if __name__ == '__main__':
     args = argparse.ArgumentParser()
     args.add_argument('--optimizer', type=str, default='adam')  # optimizer
     args.add_argument('--epochs', type=int, default=100)  # 100
-    args.add_argument('--batch', type=int, default=200)  # 200
+    args.add_argument('--batch', type=int, default=50)  # 200
     args.add_argument('--embedding', type=int, default=8)  # 8
     args.add_argument('--hidden', type=int, default=512)  # 512
     args.add_argument('--threshold', type=float, default=0.5)  # 0.5

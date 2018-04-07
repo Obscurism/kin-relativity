@@ -6,7 +6,7 @@ import torch
 from nsml import GPU_NUM
 from progressbar import ProgressBar
 
-from torch import LongTensor, Size, zeros
+from torch import FloatTensor, LongTensor, Size, zeros
 from torch.utils.data.sampler import SubsetRandomSampler
 from torch.utils.data import Dataset
 
@@ -29,6 +29,10 @@ def create_progressbar(max_value):
         'marker': '\u2588',
         'fill': ':'
     })
+
+def finish_progressbar(progbar):
+    progbar.finish()
+    print()
 
 
 class KinDataset(Dataset):
@@ -63,23 +67,23 @@ class KinDataset(Dataset):
 
                 progbar_preprocess.update(idx + 1)
 
-            progbar_preprocess.finish()
-            print()
+            finish_progressbar(progbar_preprocess)
 
         print("[Dataset] Making dictionary from sequences...")
         preprocessor.make_dict(self)
 
-        print("[Dataset] Get padding length...")
-        max_pad_len = max([len(x) for seqs in self.loaded_data for x in seqs[0]])
-
-        print("[Dataset] Padding sequences to %d vocabs." % max_pad_len)
+        print("[Dataset] Padding sequences...")
         progbar_pad = create_progressbar(max_value=self.total_data_length)
+
+        # loaded_data: Dataset
+        # seqs: Data
+        pad_lens = [max((len(seqs[0][0]), len(seqs[0][1]))) for seqs in self.loaded_data]
 
         for (idx, datum) in enumerate(self.loaded_data):
             mapped_vectors = self.preprocessor.map_vector(datum[0])
             self.loaded_data[idx] = [
                 list(map(
-                    lambda x: pad_sequence(x, max_pad_len, word2vec_mapped_size),
+                    lambda x: pad_sequence(x, pad_lens[idx], word2vec_mapped_size),
                     mapped_vectors
                 )),
                 datum[1]
@@ -87,8 +91,7 @@ class KinDataset(Dataset):
 
             progbar_pad.update(idx + 1)
 
-        progbar_pad.finish()
-        print()
+        finish_progressbar(progbar_pad)
 
         print("[Dataset] Done generating datasets.")
 
@@ -106,17 +109,14 @@ def load_batch_input_to_memory(batch_input, has_targets=True):
         batch_input = batch_input
 
     # Get the length of each seq in your batch
-    padded_tensor_length = len(batch_input[0][1])
-    seq_size = [2, padded_tensor_length, word2vec_mapped_size]
-    batch_size = [len(batch_input)] + seq_size
-    tensor_lens = LongTensor(list(map(lambda x: len(x[0]), batch_input)))
+    tensor_lens = LongTensor(list(map(lambda x: max((len(x[0]), len(x[1]))), batch_input)))
 
     # Zero-padded long-Matirx size of (B, T)
-    tensor_seqs = zeros(batch_size).long()
+    tensor_seqs = zeros((len(batch_input), 2, tensor_lens.max(), 50)).float()
     for idx, seq in enumerate(batch_input):
-        tensor_seqs[idx, :2] = LongTensor(seq)
+        tensor_seqs[idx, :2, :tensor_lens[idx]] = FloatTensor(np.array(seq))
 
-    return tensor_seqs, tensor_lens, padded_tensor_length
+    return tensor_seqs, tensor_lens
 
 
 def custom_collate_fn(data):
@@ -137,12 +137,12 @@ def custom_collate_fn(data):
     # so the targets should be ordered same here.
     # sort the sequences as descending order to use 'pack_padded_sequence' before loading.
     data.sort(key=lambda x: len(x[0]), reverse=True)
-    tensor_targets = torch.LongTensor([pair[1] for pair in data])
+    tensor_targets = LongTensor([pair[1] for pair in data])
     return [data, tensor_targets]
 
 
 def get_dataloaders(dataset_path, batch_size, ratio_of_validation=0.2, shuffle=True, preprocessor=None):
-    num_workers = 0  # Don't use multithread
+    num_workers = 0  # Don't use multithread because of konlpy
     train_kin_dataset = KinDataset(dataset_path=dataset_path, preprocessor=preprocessor)
 
     num_train = len(train_kin_dataset)
@@ -173,6 +173,7 @@ def get_dataloaders(dataset_path, batch_size, ratio_of_validation=0.2, shuffle=T
 
 
 def read_test_file(dataset_path, preprocessor):
+    # TODO fix
     data_path = os.path.join(dataset_path, 'test', test_data_name)
     loaded_data = []
     with open(data_path, 'rt', 50 * 1024 * 1024) as data_csvfile:  # maximum buffer size == 50 MB
