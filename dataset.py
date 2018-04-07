@@ -1,21 +1,40 @@
 import csv
 import os
-
 import numpy as np
 import torch
-from torch.utils.data.sampler import SubsetRandomSampler
-from torch.utils.data import Dataset
 
 from nsml import GPU_NUM
+from progressbar import ProgressBar
+
+from torch import LongTensor, Size, zeros
+from torch.utils.data.sampler import SubsetRandomSampler
+from torch.utils.data import Dataset
 
 
 train_data_name = 'train_data'
 train_label_name = 'train_label'
 test_data_name = 'test_data'
+word2vec_mapped_size = 50
+
+
+def pad_sequence(sequence, max_len, vocab_size):
+    pad_len = max_len - len(sequence)
+    padding_sequence = np.zeros((pad_len, vocab_size))
+
+    return np.concatenate([np.array(sequence), padding_sequence])
+
+
+def create_progressbar(max_value):
+    return ProgressBar(max_value=max_value, widget_kwargs={
+        'marker': '\u2588',
+        'fill': ':'
+    })
 
 
 class KinDataset(Dataset):
     def __init__(self, dataset_path, preprocessor):
+        print("[Dataset] Initializing Dataset...")
+
         self.loaded_data = []
         self.preprocessor = preprocessor
 
@@ -26,7 +45,7 @@ class KinDataset(Dataset):
                 open(data_label, 'rt') as data_label:  # maximum buffer size == 50 MB
             # the fastest way of counting the number of total file lines.
             self.total_data_length = sum(1 for _ in data_csvfile)
-            print('Total data length: ', self.total_data_length)
+            print("[Dataset] Found %d sequences. " % self.total_data_length)
 
             # reset file pointer to 0
             data_csvfile.seek(0)
@@ -34,43 +53,70 @@ class KinDataset(Dataset):
             read_line = csv.reader(data_csvfile)
             data_label = csv.reader(data_label)
 
+            print("[Dataset] Preprocessing sequences...")
+            progbar_preprocess = create_progressbar(self.total_data_length)
+
             for idx, (data, label) in enumerate(zip(read_line, data_label)):
-                # data = decompose_str_as_one_hot(data[0], warning=False)
                 data = preprocessor.parse_sentence(data[0])
                 label = int(label[0])
                 self.loaded_data.append([data, label])
 
+                progbar_preprocess.update(idx + 1)
+
+            progbar_preprocess.finish()
+            print()
+
+        print("[Dataset] Making dictionary from sequences...")
         preprocessor.make_dict(self)
+
+        print("[Dataset] Get padding length...")
+        max_pad_len = max([len(x) for seqs in self.loaded_data for x in seqs[0]])
+
+        print("[Dataset] Padding sequences to %d vocabs." % max_pad_len)
+        progbar_pad = create_progressbar(max_value=self.total_data_length)
+
+        for (idx, datum) in enumerate(self.loaded_data):
+            mapped_vectors = self.preprocessor.map_vector(datum[0])
+            self.loaded_data[idx] = [
+                list(map(
+                    lambda x: pad_sequence(x, max_pad_len, word2vec_mapped_size),
+                    mapped_vectors
+                )),
+                datum[1]
+            ];
+
+            progbar_pad.update(idx + 1)
+
+        progbar_pad.finish()
+        print()
+
+        print("[Dataset] Done generating datasets.")
 
     def __len__(self):
         return self.total_data_length
 
     def __getitem__(self, idx):
-        # this should return only one pair of instance (x, y).
-        seqs = self.loaded_data[idx]
-        batch_input = self.preprocessor.map_vector(seqs[0])
-        batch_target = seqs[1]
-        return [batch_input, batch_target]
+        return self.loaded_data[idx]
 
 
 def load_batch_input_to_memory(batch_input, has_targets=True):
-    if not all(isinstance(item, list) for item in batch_input):
-        raise Exception('Input data x should be type of \'list of lists\'')
-
     if has_targets:
-        batch_input = [[int(i) for i in seq[0]] for seq in batch_input]
+        batch_input = [seq[0] for seq in batch_input]
     else:
         batch_input = batch_input
 
     # Get the length of each seq in your batch
-    tensor_lengths = torch.LongTensor(list(map(len, batch_input)))
+    padded_tensor_length = len(batch_input[0][1])
+    seq_size = [2, padded_tensor_length, word2vec_mapped_size]
+    batch_size = [len(batch_input)] + seq_size
+    tensor_lens = LongTensor(list(map(lambda x: len(x[0]), batch_input)))
 
     # Zero-padded long-Matirx size of (B, T)
-    tensor_seqs = torch.zeros((len(batch_input), tensor_lengths.max())).long()
-    for idx, (seq, seqlen) in enumerate(zip(batch_input, tensor_lengths)):
-        tensor_seqs[idx, :seqlen] = torch.LongTensor(seq)
+    tensor_seqs = zeros(batch_size).long()
+    for idx, seq in enumerate(batch_input):
+        tensor_seqs[idx, :2] = LongTensor(seq)
 
-    return [tensor_seqs, tensor_lengths]
+    return tensor_seqs, tensor_lens, padded_tensor_length
 
 
 def custom_collate_fn(data):
@@ -96,7 +142,7 @@ def custom_collate_fn(data):
 
 
 def get_dataloaders(dataset_path, batch_size, ratio_of_validation=0.2, shuffle=True, preprocessor=None):
-    num_workers = 4  # num of threads to load data, default is 0. if you use thread(>1), don't confuse even if debug messages are reported asynchronously.
+    num_workers = 0  # Don't use multithread
     train_kin_dataset = KinDataset(dataset_path=dataset_path, preprocessor=preprocessor)
 
     num_train = len(train_kin_dataset)

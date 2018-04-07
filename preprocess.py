@@ -16,7 +16,7 @@ class Preprocessor(object):
         dataset_len = len(dataset.loaded_data) * 2
         self.update_model(online_sentences, dataset_len)
 
-        print("Added %d sentences to dict." % dataset_len)
+        print("[Preprocess] Added %d sentences to dict." % dataset_len)
 
     def save_to(self, file):
         self.model.save(file)
@@ -44,10 +44,10 @@ class Preprocessor(object):
 
     def map_vector(self, splits):
         def map_handler(x):
-            if x in self.model.wv_vocab:
-                return self.model.wv.vocab[x]
+            if x in self.model.wv.vocab:
+                return self.model[x]
 
-            return self.model.wv.vocab["./Punctuation"]
+            return self.model["./Punctuation"]
 
         # Updating Word2Vec model re-defines word vector and it is not suitable for preprocessing
         # Please refer to RaRe-Technologies/gensim/issues/1131, gensim/test/test_word2vec.py#L189

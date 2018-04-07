@@ -1,22 +1,19 @@
 import argparse
 import io
+import nsml
+import numpy as np
+import torch
 import tarfile
 import time
 
-import numpy as np
-
+from dataset import load_batch_input_to_memory, get_dataloaders, read_test_file
+from nsml import DATASET_PATH, IS_DATASET, GPU_NUM
+from preprocess import Preprocessor
 from sklearn.metrics import accuracy_score
 
-import torch
-import torch.nn.functional as F
-from torch import autograd, nn, optim
+from torch import autograd, nn, optim, Tensor
+from torch.nn.functional import sigmoid
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
-
-from preprocess import Preprocessor
-from dataset import load_batch_input_to_memory, get_dataloaders, read_test_file
-
-import nsml
-from nsml import DATASET_PATH, IS_DATASET, GPU_NUM
 
 
 def bind_model(model, wv_model):
@@ -81,8 +78,7 @@ def data_loader(dataset_path, train=False, batch_size=200,
 
 
 class LSTMRegression(nn.Module):
-    def __init__(self, embedding_dim, hidden_dim, num_layers, character_size, output_dim,
-                 minibatch_size):
+    def __init__(self, hidden_dim, num_layers, output_dim, minibatch_size):
         super(LSTMRegression, self).__init__()
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
@@ -91,7 +87,6 @@ class LSTMRegression(nn.Module):
         self.output_dim = output_dim
         self.minibatch_size = minibatch_size
         # this embedding is a table to handle sparse matrix instead of one-hot coding. so we just feed a list of indexes.
-        self.embeddings = nn.Embedding(self.character_size, self.embedding_dim)
         self.lstm = nn.LSTM(self.embedding_dim, self.hidden_dim, self.num_layers)
         # non-linear function is defined later.
         self.hidden2score = nn.Linear(self.hidden_dim, self.output_dim)
@@ -106,41 +101,20 @@ class LSTMRegression(nn.Module):
             initializer_2 = initializer_2.cuda()
         return initializer_1, initializer_2
 
-    def forward(self, data):  # define inter-layer operations
-        # re-pruning. due to dataparallel.
+    def forward(self, data):
+        preprocessed = np.array([datum[0] for datum in data])
 
-        # correct data format of input. list of list
-        # [
-        # ['미세먼지를 마시면\t미세먼지는..', 0],
-        # ['버스안내방송\t버스안내방송 질문!', 1],
-        # ['고려의 왕 이름\t고려왕들의 이름', 1],
-        # ['세상에서 제일~!\t세상에서 제일', 1],
-        # ['지표생물?\t지표생물의 뜻...', 1],
-        # ['모글이 뭔가요\t당이뭔가요???', 0],
-        # ['잠바에 묻은 얼룩\t잠바 얼룩', 1],
-        # ['크로와상\t14co2', 0] ...
-        # ]
+        var_seqs, var_lengths, pad_len = load_batch_input_to_memory(preprocessed, has_targets=False)
+        var_seqs = Tensor(var_seqs)
+        var_lengths = Tensor(var_lengths)
 
-        preprocessed = [decompose_str_as_one_hot(datum[0], warning=False) for datum in data]
-        preprocessed.sort(key=lambda x: len(x), reverse=True)
-
-        var_seqs, var_lengths = load_batch_input_to_memory(preprocessed, has_targets=False)
-
-        var_seqs = autograd.Variable(var_seqs)
-        var_lengths = autograd.Variable(var_lengths)
         if GPU_NUM:
             var_seqs = var_seqs.cuda(async=True)
-            var_lengths = var_lengths.cuda(async=True)
-
-        var_seqs = var_seqs[:, :var_lengths.data.max()]
 
         self.minibatch_size = len(var_lengths)
 
-        # Zero padded maxtrix shaped (Batch, Time) ->  Tensor shaped (Batch, Time, Embeded_Feature)
-        embeds = self.embeddings(var_seqs)
-
         # (Batch X Compact_Time , Embeded_Feature)
-        packed_x = pack_padded_sequence(embeds, var_lengths.data.cpu().numpy(), batch_first=True)
+        packed_x1 = pack_padded_sequence(var_seqs[0], var_lengths.data.cpu().numpy(), batch_first=True)
         # Compact_time means a tensor without pads. So this is a concatenated tensor with only useful sequence.
         # Ex) [[53, 16], [40,16]] --> [53+40, 16]
 
@@ -164,7 +138,7 @@ class LSTMRegression(nn.Module):
         last_lstm_outs = lstm_outs.gather(0, idx).squeeze(dim=0)
         output_activation = self.hidden2score(last_lstm_outs)
 
-        output_pred = F.sigmoid(output_activation)
+        output_pred = sigmoid(output_activation)
         return output_pred
 
 
@@ -227,8 +201,7 @@ if __name__ == '__main__':
     if GPU_NUM:
         torch.cuda.manual_seed(random_seed)
 
-    model = LSTMRegression(config.embedding, config.hidden, config.layers,
-                            config.char, config.output, config.batch)
+    model = LSTMRegression(config.hidden, config.layers, config.output, config.batch)
 
     wv_model = Preprocessor()
 

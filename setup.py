@@ -6,5 +6,8 @@ setup(
     version='1.0',
     description='',
     install_requires =[
+        'JPype1-py3',
+        'konlpy',
+        'progressbar2'
     ]
 )
