@@ -3,9 +3,10 @@ from gensim.models import Word2Vec
 from konlpy.tag import Twitter
 from os import path
 
+twitter = Twitter()
+
 class Preprocessor(object):
     def __init__(self):
-        self.twitter = Twitter()
         self.model = Word2Vec(None, min_count=3, size=50, iter=10, sg=0)
         self.model_initialized = False
 
@@ -36,7 +37,7 @@ class Preprocessor(object):
     def parse_split(self, split):
         return list(map(
             lambda word: "/".join(word),
-            self.twitter.pos(split, norm=True, stem=True)
+            twitter.pos(split, norm=True, stem=True)
         ))
 
     def parse_sentence(self, sentence):
@@ -72,3 +73,7 @@ class Preprocessor(object):
         ]
 
         return padded_vectors
+
+    def preprocess_test_all(self, sentences):
+        # sentences: InputSet
+        return [[self.preprocess_test(sentence), 0] for sentence in sentences]

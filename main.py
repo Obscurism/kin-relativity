@@ -31,9 +31,9 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 # Data := [Input, Output]
 # Dataset := [Data...]
 
-def bind_model(comp_model):
+def bind_model(comp_model, config):
     model, wv_model = comp_model
-    
+
     def save(filename, *args):
         # save the model with 'checkpoint' dictionary.
         print("[Save] Saving...")
@@ -90,32 +90,22 @@ def bind_model(comp_model):
 
 
     def infer(raw_data, **kwargs):
-        data = raw_data['data']
-        data = wv_model.preprocess_test(data)
-        # data: Input
-
-        dataset = [[data, 0]]
-        # dataset: Dataset
-
         model.eval()
-        output_predictions = model(dataset)
+
+        data = raw_data
+        data = wv_model.preprocess_test_all(data)
+        # data: Dataset
+
+        output_predictions = model(data)
         output_predictions = output_predictions.squeeze()
         prob = output_predictions.data
-        prediction = np.where(prob > 0.5, 1, 0)
-        return list(zip(prob, prediction.tolist()))
+
+        output_data = [[prob, 1 if prob > 0.5 else 0] for prob in output_predictions.data]
+        return output_data
 
     nsml.bind(save, load, infer)
 
-
-def data_loader(dataset_path, train=False, batch_size=200,
-                ratio_of_validation=0.1, shuffle=True, preprocessor=None):
-    if train:
-        return get_dataloaders(dataset_path=dataset_path, batch_size=batch_size,
-                               ratio_of_validation=ratio_of_validation,
-                               shuffle=shuffle, preprocessor=preprocessor)
-    else:
-        data_dict = {'data': read_test_file(dataset_path=DATASET_PATH, preprocessor=preprocessor)}
-        return data_dict
+    return save, load, infer
 
 
 class LSTMRegression(nn.Module):
@@ -240,7 +230,8 @@ def inference_loop(data_loader, model, loss_function, optimizer, threshold, lear
             optimizer.step()
 
         # progbar.update(i)
-        print('Batch : ', i + 1, '/', len(data_loader), ', BCE in this minibatch: ', loss.data[0])
+        if i % 5 == 0:
+            print('Batch : ', i + 1, '/', len(data_loader), ', BCE in this minibatch: ', loss.data[0])
 
     # finish_progressbar(progbar)
     return sum_loss / num_of_instances, acc_sum / num_of_instances  # return mean loss
@@ -272,6 +263,17 @@ if __name__ == '__main__':
 
     wv_model = Preprocessor()
 
+
+    def kin_data_loader(dataset_path, train=False, batch_size=200,
+                    ratio_of_validation=0.1, shuffle=True):
+        if train:
+            return get_dataloaders(dataset_path=dataset_path, batch_size=batch_size,
+                                   ratio_of_validation=ratio_of_validation,
+                                   shuffle=shuffle, preprocessor=wv_model)
+        else:
+            data_dict = {'data': read_test_file(dataset_path=DATASET_PATH, preprocessor=wv_model)}
+            return data_dict
+
     loss_function = nn.BCELoss()
     if GPU_NUM:
         model = model.cuda()
@@ -285,7 +287,7 @@ if __name__ == '__main__':
 
     comp_model = (model, wv_model)
 
-    bind_model(comp_model)
+    bind_model(comp_model, config)
 
     if config.pause:
         nsml.paused(scope=locals())
@@ -296,9 +298,9 @@ if __name__ == '__main__':
         if HAS_DATASET:
             data_path = DATASET_PATH
 
-        train_loader, val_loader = data_loader(dataset_path=data_path, train=True,
-                                               batch_size=config.batch, ratio_of_validation=0.1,
-                                               shuffle=True, preprocessor=wv_model)
+        train_loader, val_loader = kin_data_loader(dataset_path=data_path, train=True,
+                                                   batch_size=config.batch, ratio_of_validation=0.1,
+                                                   shuffle=True)
 
         min_val_loss = np.inf
         for epoch in range(config.epochs):
@@ -328,5 +330,5 @@ if __name__ == '__main__':
                 nsml.save(epoch)
 
             else:  # default save
-                if epoch % 20 == 0:
+                if epoch % 10 == 0:
                     nsml.save(epoch)
