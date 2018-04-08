@@ -8,6 +8,7 @@ setup(
     install_requires =[
         'JPype1-py3',
         'konlpy',
-        'progressbar2'
+        'progressbar2',
+        'gensim'
     ]
 )

@@ -1,15 +1,19 @@
+from dataset import pad_sequence, word2vec_mapped_size
+from gensim.models import Word2Vec
 from konlpy.tag import Twitter
 from os import path
-
-import gensim
 
 class Preprocessor(object):
     def __init__(self):
         self.twitter = Twitter()
-        self.model = None
+        self.model = Word2Vec(None, min_count=3, size=50, iter=10, sg=0)
+        self.model_initialized = False
 
         if path.isfile("./results/word2vec"):
-            self.model = gensim.models.Word2Vec.load("./results/word2vec")
+            self.model = Word2Vec.load("./results/word2vec")
+            self.model_initialized = True
+
+            print("[Preprocess] Initialized from existing word2vec vocabulary!")
 
     def make_dict(self, dataset):
         online_sentences = [y for x in dataset.loaded_data for y in x[0]]
@@ -22,11 +26,12 @@ class Preprocessor(object):
         self.model.save(file)
 
     def update_model(self, sentences, total_examples):
-        self.model.build_vocab(sentences, update=True)
+        self.model.build_vocab(sentences, update=self.model_initialized)
         self.model.train(sentences, epochs=self.model.iter, total_examples=total_examples)
 
     def load_from(self, file):
-        self.model = gensim.models.Word2Vec.load(file)
+        self.model = Word2Vec.load(file)
+        self.model_initialized = True
 
     def parse_split(self, split):
         return list(map(
@@ -59,5 +64,11 @@ class Preprocessor(object):
 
     def preprocess_test(self, sentence):
         splits = self.parse_sentence(sentence)
+        mapped_vectors = self.map_vector(splits)
+        pad_len = max([len(mapped_vectors[0]), len(mapped_vectors[1])])
+        padded_vectors = [
+            pad_sequence(mapped_vectors[0], pad_len, word2vec_mapped_size),
+            pad_sequence(mapped_vectors[1], pad_len, word2vec_mapped_size)
+        ]
 
-        return self.map_vector(splits)
+        return padded_vectors

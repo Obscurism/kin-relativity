@@ -2,13 +2,15 @@ import argparse
 import io
 import nsml
 import numpy as np
+import os
 import torch
 import tarfile
 import time
 
 from dataset import load_batch_input_to_memory, get_dataloaders, read_test_file, word2vec_mapped_size
-from nsml import DATASET_PATH, IS_DATASET, GPU_NUM
+from nsml import DATASET_PATH, HAS_DATASET, GPU_NUM
 from preprocess import Preprocessor
+from progress import create_progressbar, finish_progressbar
 from sklearn.metrics import accuracy_score
 
 from torch import cat, nn, optim, Tensor
@@ -29,54 +31,79 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 # Data := [Input, Output]
 # Dataset := [Data...]
 
-
-def bind_model(model, wv_model):
+def bind_model(comp_model):
+    model, wv_model = comp_model
+    
     def save(filename, *args):
         # save the model with 'checkpoint' dictionary.
+        print("[Save] Saving...")
+        tarball = tarfile.open(filename, 'w')
+
+        print("[Save] Saving torch file...")
         checkpoint = {
             'model': model.state_dict()
         }
-        torch_file = io.BytesIO()
+        torch_file = open('torch_model.tmp', 'wb+')
         torch.save(checkpoint, torch_file)
-        torch_info = tarfile.TarInfo("torch")
-        torch_info.size = len(torch_file.getbuffer())
+        torch_file.seek(0)
+        torch_info = tarball.gettarinfo(fileobj=torch_file)
 
-        wv_file = io.BytesIO()
+        print("[Save] Saving word2vec file...")
+        wv_file = open('wv_model.tmp', 'wb+')
         wv_model.save_to(wv_file)
-        wv_info = tarfile.TarInfo("word2vec")
-        wv_info.size = len(wv_file.getbuffer())
+        wv_file.seek(0)
+        wv_info = tarball.gettarinfo(fileobj=wv_file)
 
-        tarball = tarfile.open(filename, 'w')
-        tarball.add(wv_info, wv_file)
-        tarball.add(torch_info, torch_file)
+        print("[Save] Compressing files into tar file...")
+        tarball.addfile(wv_info, wv_file)
+        tarball.addfile(torch_info, torch_file)
         tarball.close()
 
+        torch_file.close()
+        wv_file.close()
+
+        print("[Save] Removing temporary files...")
+        os.remove('torch_model.tmp')
+        os.remove('wv_model.tmp')
+
+        print("[Save] Saving complete!")
+
     def load(filename, *args):
+        print("[Load] Loading...")
         tarball = tarfile.open(filename, 'r')
         for mem in tarball.getmembers():
-            file = extractfile(mem)
-            if mem.name == 'word2vec':
-                wv_model.load_from(file)
-                print('Word2Vec Model loaded')
+            tarball.extract(mem)
 
-            elif mem.name == 'torch':
-                checkpoint = torch.load(file)
+            if mem.name == 'wv_model.tmp':
+                wv_model.load_from(mem.name)
+                print('[Load] Word2Vec Model loaded.')
+
+            elif mem.name == 'torch_model.tmp':
+                extr_file = open(mem.name, 'rb')
+                checkpoint = torch.load(extr_file)
                 model.load_state_dict(checkpoint['model'])
-                print('PyTorch Model loaded')
+                extr_file.close()
+
+                print('[Load] PyTorch Model loaded.')
+
+            os.remove(mem.name)
 
 
     def infer(raw_data, **kwargs):
         data = raw_data['data']
         data = wv_model.preprocess_test(data)
+        # data: Input
+
+        dataset = [[data, 0]]
+        # dataset: Dataset
 
         model.eval()
-        output_predictions = model(data)
+        output_predictions = model(dataset)
         output_predictions = output_predictions.squeeze()
         prob = output_predictions.data
         prediction = np.where(prob > 0.5, 1, 0)
         return list(zip(prob, prediction.tolist()))
 
-    # function in function is just used to divide the namespace.
     nsml.bind(save, load, infer)
 
 
@@ -186,6 +213,9 @@ def inference_loop(data_loader, model, loss_function, optimizer, threshold, lear
     sum_loss = 0.0
     num_of_instances = 0
     acc_sum = 0.0
+
+    # progbar = create_progressbar(len(data_loader))
+
     for i, (data, label) in enumerate(data_loader):
         # we need to clear out the hidden state of the LSTM, detaching it from its history on the last instance.
         # Tensors not supported in DataParallel. You should put Variable to use data_parallel before call forward().
@@ -208,16 +238,19 @@ def inference_loop(data_loader, model, loss_function, optimizer, threshold, lear
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+
+        # progbar.update(i)
         print('Batch : ', i + 1, '/', len(data_loader), ', BCE in this minibatch: ', loss.data[0])
 
+    # finish_progressbar(progbar)
     return sum_loss / num_of_instances, acc_sum / num_of_instances  # return mean loss
 
 
 if __name__ == '__main__':
     args = argparse.ArgumentParser()
     args.add_argument('--optimizer', type=str, default='adam')  # optimizer
-    args.add_argument('--epochs', type=int, default=100)  # 100
-    args.add_argument('--batch', type=int, default=50)  # 200
+    args.add_argument('--epochs', type=int, default=20)  # 20
+    args.add_argument('--batch', type=int, default=128)  # 200
     args.add_argument('--hidden', type=int, default=512)  # 512
     args.add_argument('--hidden-dense', type=int, default=256)  # 256
     args.add_argument('--dropout', type=float, default=0.15) # 0.15
@@ -231,10 +264,6 @@ if __name__ == '__main__':
 
     initial_time = time.time()
     config = args.parse_args()
-    random_seed = 1234
-    np.random.seed(random_seed)
-    if GPU_NUM:
-        torch.cuda.manual_seed(random_seed)
 
     model = LSTMRegression(
         config.hidden, config.hidden_dense, config.layers,
@@ -254,14 +283,17 @@ if __name__ == '__main__':
     else:
         optimizer = optim.Adam(model.parameters(), lr=config.initial_lr)
 
-    bind_model(model, wv_model)
+    comp_model = (model, wv_model)
+
+    bind_model(comp_model)
+
     if config.pause:
         nsml.paused(scope=locals())
 
     if config.mode == 'train':
         data_path = "./dummy/kin/"
 
-        if IS_DATASET:
+        if HAS_DATASET:
             data_path = DATASET_PATH
 
         train_loader, val_loader = data_loader(dataset_path=data_path, train=True,
@@ -270,16 +302,20 @@ if __name__ == '__main__':
 
         min_val_loss = np.inf
         for epoch in range(config.epochs):
+            print('[Train #%d]' % epoch)
+            print()
             # train on train set
-            train_loss, train_acc = inference_loop(train_loader, model, loss_function, optimizer, threshold,
-                                                   learning=True)
+            train_loss, train_acc = inference_loop(train_loader, model, loss_function,
+                                                   optimizer, threshold, learning=True)
             # evaluate on validation set
             val_loss, val_acc = inference_loop(val_loader, model, loss_function,
                                                None, threshold, learning=False)
 
-            print('epoch:', epoch, ' train_loss:', train_loss, 'train_acc:', train_acc,
-                  ' val_loss:', val_loss, ' min_val_loss:', min_val_loss,
-                  'val_acc:', val_acc)
+            print()
+            print('train_loss: %.5f' % train_loss, 'train_acc   : %.5f' % train_acc)
+            print('val_loss  : %.5f' % val_loss,   'min_val_loss: %.5f' % min_val_loss, 'val_acc: %.5f' % val_acc)
+            print()
+            print()
 
             nsml.report(summary=True, scope=locals(), epoch=epoch,
                         total_epoch=config.epochs, val_acc=val_acc,

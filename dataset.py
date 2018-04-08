@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from nsml import GPU_NUM
-from progressbar import ProgressBar
+from progress import create_progressbar, finish_progressbar
 
 from torch import FloatTensor, LongTensor, Size, zeros
 from torch.utils.data.sampler import SubsetRandomSampler
@@ -22,17 +22,6 @@ def pad_sequence(sequence, max_len, vocab_size):
     padding_sequence = np.zeros((pad_len, vocab_size))
 
     return np.concatenate([np.array(sequence), padding_sequence])
-
-
-def create_progressbar(max_value):
-    return ProgressBar(max_value=max_value, widget_kwargs={
-        'marker': '\u2588',
-        'fill': ':'
-    })
-
-def finish_progressbar(progbar):
-    progbar.finish()
-    print()
 
 
 class KinDataset(Dataset):
@@ -173,7 +162,6 @@ def get_dataloaders(dataset_path, batch_size, ratio_of_validation=0.2, shuffle=T
 
 
 def read_test_file(dataset_path, preprocessor):
-    # TODO fix
     data_path = os.path.join(dataset_path, 'test', test_data_name)
     loaded_data = []
     with open(data_path, 'rt', 50 * 1024 * 1024) as data_csvfile:  # maximum buffer size == 50 MB
