@@ -100,15 +100,15 @@ class LSTMRegression(nn.Module):
         self.minibatch_size = minibatch_size
 
         # TODO bidir
-        self.lstm0_l0 = nn.LSTM(word2vec_mapped_size, self.hidden_dim, self.num_layers)
-        self.lstm1_l0 = nn.LSTM(word2vec_mapped_size, self.hidden_dim, self.num_layers)
-        self.dense_l1 = nn.Linear(2 * self.hidden_dim, self.output_dim)
+        self.lstm0_l0 = nn.LSTM(word2vec_mapped_size, self.hidden_dim, self.num_layers, bidirectional=True)
+        self.lstm1_l0 = nn.LSTM(word2vec_mapped_size, self.hidden_dim, self.num_layers, bidirectional=True)
+        self.dense_l1 = nn.Linear(4 * self.hidden_dim, self.output_dim)
 
     def init_hidden(self):
         initializer_1 = Variable(
-            torch.zeros(self.num_layers, self.minibatch_size, self.hidden_dim))
+            torch.zeros(self.num_layers * 2, self.minibatch_size, self.hidden_dim))
         initializer_2 = Variable(
-            torch.zeros(self.num_layers, self.minibatch_size, self.hidden_dim))
+            torch.zeros(self.num_layers * 2, self.minibatch_size, self.hidden_dim))
         if GPU_NUM:
             initializer_1 = initializer_1.cuda()
             initializer_2 = initializer_2.cuda()
@@ -164,7 +164,7 @@ class LSTMRegression(nn.Module):
         x1_out = x1_out.gather(0, idx).squeeze(dim=0)
 
         # CAT IS SO CUTE, unless the cat is 'concat'. Nyan Nyan Nyan
-        lstm_out = cat((x0_out, x1_out))
+        lstm_out = cat((x0_out, x1_out), 1)
 
         output_activation = self.dense_l1(lstm_out)
 
