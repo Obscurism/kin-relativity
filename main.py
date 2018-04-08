@@ -13,7 +13,7 @@ from sklearn.metrics import accuracy_score
 
 from torch import cat, nn, optim, Tensor
 from torch.autograd import Variable
-from torch.nn.functional import sigmoid
+from torch.nn.functional import relu, sigmoid
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 
@@ -92,17 +92,22 @@ def data_loader(dataset_path, train=False, batch_size=200,
 
 
 class LSTMRegression(nn.Module):
-    def __init__(self, hidden_dim, num_layers, output_dim, minibatch_size):
+    def __init__(
+        self, hidden_dim, hidden_dense, num_layers,
+        output_dim, minibatch_size, drop_prob
+    ):
         super(LSTMRegression, self).__init__()
         self.hidden_dim = hidden_dim
+        self.hidden_dense = hidden_dense
         self.num_layers = num_layers
         self.output_dim = output_dim
         self.minibatch_size = minibatch_size
+        self.drop_prob = drop_prob
 
-        # TODO bidir
-        self.lstm0_l0 = nn.LSTM(word2vec_mapped_size, self.hidden_dim, self.num_layers)
-        self.lstm1_l0 = nn.LSTM(word2vec_mapped_size, self.hidden_dim, self.num_layers)
-        self.dense_l1 = nn.Linear(2 * self.hidden_dim, self.output_dim)
+        self.lstm0_l0 = nn.LSTM(word2vec_mapped_size, self.hidden_dim, self.num_layers, dropout=self.drop_prob)
+        self.lstm1_l0 = nn.LSTM(word2vec_mapped_size, self.hidden_dim, self.num_layers, dropout=self.drop_prob)
+        self.dense_l1 = nn.Linear(2 * self.hidden_dim, self.hidden_dense)
+        self.dense_l2 = nn.Linear(self.hidden_dense, self.output_dim)
 
     def init_hidden(self):
         initializer_1 = Variable(
@@ -166,9 +171,9 @@ class LSTMRegression(nn.Module):
         # CAT IS SO CUTE, unless the cat is 'concat'. Nyan Nyan Nyan
         lstm_out = cat((x0_out, x1_out), 1)
 
-        output_activation = self.dense_l1(lstm_out)
+        dense_out = relu(self.dense_l1(lstm_out))
+        output_pred = sigmoid(self.dense_l2(dense_out))
 
-        output_pred = sigmoid(output_activation)
         return output_pred
 
 
@@ -213,12 +218,12 @@ if __name__ == '__main__':
     args.add_argument('--optimizer', type=str, default='adam')  # optimizer
     args.add_argument('--epochs', type=int, default=100)  # 100
     args.add_argument('--batch', type=int, default=50)  # 200
-    args.add_argument('--embedding', type=int, default=8)  # 8
     args.add_argument('--hidden', type=int, default=512)  # 512
+    args.add_argument('--hidden-dense', type=int, default=256)  # 256
+    args.add_argument('--dropout', type=float, default=0.15) # 0.15
     args.add_argument('--threshold', type=float, default=0.5)  # 0.5
     args.add_argument('--layers', type=int, default=2)  # 2
     args.add_argument('--initial_lr', type=float, default=0.01)  # default : 0.01 (initial learning rate)
-    args.add_argument('--char', type=int, default=250)  # Do not change this
     args.add_argument('--output', type=int, default=1)  # Do not change this
     args.add_argument('--mode', type=str, default='train')  # 'train' or 'test' (for nsml)
     args.add_argument('--pause', type=int, default=0)  # Do not change this (for nsml)
@@ -231,7 +236,10 @@ if __name__ == '__main__':
     if GPU_NUM:
         torch.cuda.manual_seed(random_seed)
 
-    model = LSTMRegression(config.hidden, config.layers, config.output, config.batch)
+    model = LSTMRegression(
+        config.hidden, config.hidden_dense, config.layers,
+        config.output, config.batch, config.dropout
+    )
 
     wv_model = Preprocessor()
 
